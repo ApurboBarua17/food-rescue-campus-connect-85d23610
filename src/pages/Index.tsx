@@ -1,6 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Utensils, Users, Clock, TrendingUp } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/integrations/supabase/client";
 import Header from "@/components/Header";
 import FoodCard from "@/components/FoodCard";
 import AddFoodModal from "@/components/AddFoodModal";
@@ -8,83 +11,179 @@ import StatsCard from "@/components/StatsCard";
 
 const Index = () => {
   const { toast } = useToast();
+  const { user, profile, loading } = useAuth();
+  const navigate = useNavigate();
   const [userRole, setUserRole] = useState<'student' | 'cafeteria'>('student');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [foodItems, setFoodItems] = useState([
-    {
-      id: '1',
-      title: 'Fresh Garden Salads',
-      description: 'Mixed greens with seasonal vegetables and dressing options',
-      quantity: '12 servings',
-      location: 'Main Counter',
-      timeLeft: '2 hours',
-      dietaryInfo: ['Vegetarian', 'Vegan', 'Gluten-Free'],
-      cafeteria: 'Student Union Cafeteria',
-      distance: '0.2 miles',
-      claimed: false
-    },
-    {
-      id: '2',
-      title: 'Chicken Wraps',
-      description: 'Grilled chicken with fresh vegetables in whole wheat wraps',
-      quantity: '8 servings',
-      location: 'Grab & Go Station',
-      timeLeft: '1.5 hours',
-      dietaryInfo: ['Dairy-Free'],
-      cafeteria: 'Engineering Building Café',
-      distance: '0.4 miles',
-      claimed: false
-    },
-    {
-      id: '3',
-      title: 'Veggie Pizza Slices',
-      description: 'Fresh pizza with bell peppers, mushrooms, and olives',
-      quantity: '15 slices',
-      location: 'Pizza Station',
-      timeLeft: '3 hours',
-      dietaryInfo: ['Vegetarian'],
-      cafeteria: 'Library Food Court',
-      distance: '0.1 miles',
-      claimed: true
-    },
-    {
-      id: '4',
-      title: 'Fresh Fruit Bowls',
-      description: 'Seasonal fruit mix with yogurt on the side',
-      quantity: '10 bowls',
-      location: 'Healthy Corner',
-      timeLeft: '4 hours',
-      dietaryInfo: ['Vegetarian', 'Gluten-Free'],
-      cafeteria: 'Student Union Cafeteria',
-      distance: '0.2 miles',
-      claimed: false
+  const [foodItems, setFoodItems] = useState<any[]>([]);
+  const [realTimeUpdates, setRealTimeUpdates] = useState(0);
+
+  // Redirect to auth if not logged in
+  useEffect(() => {
+    if (!loading && !user) {
+      navigate("/auth");
     }
-  ]);
+  }, [user, loading, navigate]);
 
-  const handleClaimFood = (id: string) => {
-    setFoodItems(prev => 
-      prev.map(item => 
-        item.id === id ? { ...item, claimed: true } : item
+  // Fetch food items from Supabase
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchFoodItems = async () => {
+      try {
+        const { data, error } = await (supabase as any)
+          .from('food_items')
+          .select(`
+            *,
+            profiles:created_by (
+              full_name
+            )
+          `)
+          .eq('status', 'available')
+          .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        setFoodItems(data || []);
+      } catch (error) {
+        console.error('Error fetching food items:', error);
+      }
+    };
+
+    fetchFoodItems();
+  }, [user, realTimeUpdates]);
+
+  // Set up real-time subscriptions
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel('food_items_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'food_items'
+        },
+        () => {
+          setRealTimeUpdates(prev => prev + 1);
+        }
       )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  // Set user role based on profile
+  useEffect(() => {
+    if (profile?.role === 'cafeteria_staff') {
+      setUserRole('cafeteria');
+    } else {
+      setUserRole('student');
+    }
+  }, [profile]);
+
+  // Show loading while checking auth
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 bg-sustainable-500 rounded-lg flex items-center justify-center mx-auto mb-4">
+            <span className="text-white font-bold text-sm">🍃</span>
+          </div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
+      </div>
     );
-    toast({
-      title: "Food Claimed Successfully!",
-      description: "Check your email for pickup details.",
-    });
+  }
+
+  const handleClaimFood = async (id: string) => {
+    try {
+      // Update in database
+      const { error } = await (supabase as any)
+        .from('orders')
+        .insert({
+          food_item_id: id,
+          student_id: profile?.id,
+          pickup_code: Math.random().toString(36).substring(2, 8).toUpperCase(),
+          status: 'pending'
+        });
+
+      if (error) throw error;
+
+      // Update food item status
+      await (supabase as any)
+        .from('food_items')
+        .update({ status: 'claimed' })
+        .eq('id', id);
+
+      toast({
+        title: "Food Claimed Successfully!",
+        description: "Check your email for pickup details.",
+      });
+    } catch (error) {
+      console.error('Error claiming food:', error);
+      toast({
+        title: "Error",
+        description: "Failed to claim food. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
 
-  const handleAddFood = (newFood: any) => {
-    setFoodItems(prev => [newFood, ...prev]);
-    toast({
-      title: "Food Added Successfully!",
-      description: "Students can now see your available food.",
-    });
+  const handleAddFood = async (newFood: any) => {
+    try {
+      const { error } = await (supabase as any)
+        .from('food_items')
+        .insert({
+          title: newFood.title,
+          description: newFood.description,
+          quantity: parseInt(newFood.quantity.split(' ')[0]) || 1,
+          location: newFood.location,
+          dietary_restrictions: newFood.dietaryInfo,
+          expires_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(), // 4 hours from now
+          created_by: profile?.id,
+          status: 'available'
+        });
+
+      if (error) throw error;
+
+      toast({
+        title: "Food Added Successfully!",
+        description: "Students can now see your available food.",
+      });
+    } catch (error) {
+      console.error('Error adding food:', error);
+      toast({
+        title: "Error",
+        description: "Failed to add food. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
+
+  // Transform Supabase data to match component interface
+  const displayFoodItems = foodItems.map(item => ({
+    id: item.id,
+    title: item.title,
+    description: item.description || '',
+    quantity: `${item.quantity} servings`,
+    location: item.location || 'Campus',
+    timeLeft: item.expires_at ? 
+      Math.max(0, Math.floor((new Date(item.expires_at).getTime() - Date.now()) / (1000 * 60 * 60))) + ' hours' : 
+      '2 hours',
+    dietaryInfo: item.dietary_restrictions || [],
+    cafeteria: item.profiles?.full_name || 'Campus Cafeteria',
+    distance: '0.2 miles',
+    claimed: item.status === 'claimed'
+  }));
 
   const stats = [
     {
       title: "Available Today",
-      value: foodItems.filter(item => !item.claimed).length,
+      value: displayFoodItems.filter(item => !item.claimed).length,
       icon: <Utensils className="w-6 h-6" />,
       trend: "+3 from yesterday"
     },
@@ -161,7 +260,7 @@ const Index = () => {
 
         {/* Food Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {foodItems.map((food) => (
+          {displayFoodItems.map((food) => (
             <FoodCard
               key={food.id}
               food={food}
@@ -172,7 +271,7 @@ const Index = () => {
         </div>
 
         {/* Empty State */}
-        {foodItems.length === 0 && (
+        {displayFoodItems.length === 0 && (
           <div className="text-center py-12">
             <Utensils className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No food available</h3>

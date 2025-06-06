@@ -1,5 +1,6 @@
-import { MapPin, User, Plus, Menu } from "lucide-react";
+import { MapPin, User, Plus, Menu, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/hooks/useAuth";
 
 interface HeaderProps {
   userRole: 'student' | 'cafeteria';
@@ -8,6 +9,12 @@ interface HeaderProps {
 }
 
 const Header = ({ userRole, onRoleChange, onAddFood }: HeaderProps) => {
+  const { profile, signOut } = useAuth();
+
+  const handleSignOut = async () => {
+    await signOut();
+  };
+
   return (
     <header className="bg-white shadow-sm border-b border-gray-100">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -63,10 +70,15 @@ const Header = ({ userRole, onRoleChange, onAddFood }: HeaderProps) => {
               </Button>
             )}
 
-            {/* Profile */}
-            <Button variant="ghost" size="sm">
-              <User className="w-4 h-4" />
-            </Button>
+            {/* Profile & Sign Out */}
+            <div className="flex items-center space-x-2">
+              <span className="hidden sm:inline text-sm text-gray-600">
+                {profile?.full_name || 'User'}
+              </span>
+              <Button variant="ghost" size="sm" onClick={handleSignOut}>
+                <LogOut className="w-4 h-4" />
+              </Button>
+            </div>
 
             {/* Mobile Menu */}
             <Button variant="ghost" size="sm" className="md:hidden">
